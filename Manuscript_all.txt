@@ -1,0 +1,1124 @@
+## Great Lakes Count Table Preparation
+
+#!/bin/bash
+
+
+
+#SBATCH --job-name=RNA_seq
+
+#SBATCH --output=RNA_seq_%j.out
+
+#SBATCH --error=RNA_seq_%j.err
+
+#SBATCH --time=48:00:00
+
+#SBATCH --cpus-per-task=16
+
+#SBATCH --mem=500G
+
+#SBATCH --partition=largemem
+
+#SBATCH --account=bisgin0
+
+
+
+# Preparation
+
+# mkdir -p fastq  # locate fastq.gz files here
+
+
+
+module load Bioinformatics
+
+module load  star/2.7.11a-hdp2onj
+
+module load multiqc/1.22.2
+
+module load samtools/1.13-fwwss5n
+
+module load subread/2.0.3
+
+module load UCSC-utilities/4.0.0
+
+module load trimgalore/0.6.7-ztb2tpz
+
+module load bedtools2/2.30.0-svcfwbm
+
+module load star
+
+module load RSEM/1.3.3
+
+module save 
+
+
+
+
+#Step 1: Create directories
+
+
+
+
+
+mkdir -p aligned_data
+
+mkdir -p aligned_qc
+
+mkdir -p counts
+
+mkdir -p fastqc_results
+
+mkdir -p trimmed_fastqc_results
+
+mkdir -p aligned_fastqc_results
+
+mkdir -p BW
+
+mkdir -p txIndex
+
+mkdir -p expression_results
+
+mkdir -p analysis
+
+
+
+
+# Step 2: Download reference genome and annotation files
+
+# Soft mask
+
+wget -P ref https://ftp.ensembl.org/pub/release-112/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa.gz
+
+
+# Annotation
+
+wget -P ref https://ftp.ensembl.org/pub/release-112/gtf/homo_sapiens/Homo_sapiens.GRCh38.112.gtf.gz
+
+
+
+# Unzip the downloaded files
+
+gunzip ref/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa.gz
+
+gunzip ref/Homo_sapiens.GRCh38.112.gtf.gz
+
+Generate ref. genome index
+
+samtools faidx ref/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa
+
+
+
+# Step 3: FastQC Analysis of Fastq Files
+
+fastqc -t 8 -o fastqc_results/ fastq/*.fastq.gz
+
+multiqc fastqc_results/ -o fastqc_results/
+
+
+
+# Step 4: Trimming Fastq Files
+
+
+trim_galore --paired --quality 20 --length 36 --stringency 5 --fastqc --output_dir trimmed_fastq fastq/*.fastq.gz
+
+
+
+
+
+# Step 5: FastQC Analysis of Trimmed Files
+
+
+fastqc -t 8 -o trimmed_fastqc_results/ trimmed_fastq/*.fq.gz
+
+multiqc trimmed_fastqc_results/ -o trimmed_fastqc_results/
+
+
+
+
+# Step 6: Generate Genome Index by STAR
+
+STAR --runMode genomeGenerate --genomeDir star_index --genomeFastaFiles ref/Homo_sapiens.GRCh38.dna_sm.primary_assembly.fa --sjdbGTFfile ref/Homo_sapiens.GRCh38.112.gtf --runThreadN 16
+
+
+
+# Step 7: Alignment of Trimmed Files with STAR
+
+
+for sample in $(ls trimmed_fastq/*_R*_001_val_1.fq.gz | sed 's/_R[0-9]_001_val_1.fq.gz//' | sed 's/trimmed_fastq\///'); do
+    STAR --runThreadN 16 --genomeDir star_index --readFilesIn trimmed_fastq/${sample}_R1_001_val_1.fq.gz trimmed_fastq/${sample}_R2_001_val_2.fq.gz --readFilesCommand zcat --outFileNamePrefix aligned_data/${sample}_ --outSAMtype BAM SortedByCoordinate --quantMode TranscriptomeSAM
+done
+
+# Step 8: Flagstat and Idxstats Quality Control of Alignment
+
+# Indexing and generating flagstat and idxstats only for genome-aligned BAM files
+
+for bamfile in aligned_data/*_Aligned.sortedByCoord.out.bam; do
+    samtools index $bamfile
+    samtools flagstat $bamfile > aligned_qc/$(basename $bamfile .bam)_flagstat.txt
+    samtools idxstats $bamfile > aligned_qc/$(basename $bamfile .bam)_idxstats.txt
+done
+
+# Generating flagstat for transcriptome BAM files
+for bamfile in aligned_data/*_Aligned.toTranscriptome.out.bam; do
+    samtools flagstat $bamfile > aligned_qc/$(basename $bamfile .bam)_flagstat.txt
+done
+
+
+# Step 9: FastQC Analysis of Aligned Files
+  
+fastqc -t 8 -o aligned_fastqc_results/ aligned_data/*.bam
+
+multiqc aligned_fastqc_results/ -o aligned_fastqc_results/
+
+
+
+# Step 10: Generating the count table
+
+featureCounts -T 16 -p --countReadPairs -a ref/Homo_sapiens.GRCh38.112.gtf -o counts/gene_counts.txt aligned_data/*.bam
+
+
+
+
+## R Filtered Count Table Preparation
+
+
+
+
+
+```{r read-data}
+
+gene_counts <- read.table("gene_counts.txt", header = TRUE, sep = "\t", row.names = 1)
+
+colnames(gene_counts)
+```
+
+
+```{r remove-columns}
+
+gene_counts <- gene_counts[, -c(1:5)]
+
+colnames(gene_counts)
+```
+
+```{r rename-columns}
+
+new_colnames <- sub(".*_(S[0-9]+)_.*", "\\1", colnames(gene_counts))
+
+colnames(gene_counts) <- new_colnames
+
+colnames(gene_counts)
+```
+
+
+```{r split-tables}
+# Create a mapping of sample IDs to conditions with "Control"
+sample_conditions <- data.frame(
+  Sample = c("S25", "S26", "S27", "S28", "S29", "S30", "S31", "S33", "S34", "S35", "S36", "S37", "S38", "S39", "S40", "S41", "S42", "S43", "S44", "S45", "S46", "S47", "S48", "S49", "S50"),
+  Condition = c("EtOH", "Control", "Control", "Control", "NASH", "NASH", "Control", "NASH", "NASH", "EtOH", "EtOH", "NASH", "NASH", "EtOH", "EtOH", "EtOH", "EtOH", "Control", "NASH", "NASH", "NASH", "EtOH", "Control", "EtOH", "EtOH")
+)
+
+# Subset the gene_counts data frame based on conditions
+EtOH_samples <- sample_conditions$Sample[sample_conditions$Condition == "EtOH"]
+Control_samples <- sample_conditions$Sample[sample_conditions$Condition == "Control"]
+NASH_samples <- sample_conditions$Sample[sample_conditions$Condition == "NASH"]
+
+gene_counts_EtOH <- gene_counts[, EtOH_samples]
+gene_counts_Control <- gene_counts[, Control_samples]
+gene_counts_NASH <- gene_counts[, NASH_samples]
+
+# Display the first few rows of each subset
+list(EtOH = head(gene_counts_EtOH), Control = head(gene_counts_Control), NASH = head(gene_counts_NASH))
+```
+
+```{r rename-columns-with-prefixes}
+# Rename columns for each condition
+colnames(gene_counts_Control) <- paste0("C_", colnames(gene_counts_Control))
+colnames(gene_counts_EtOH) <- paste0("E_", colnames(gene_counts_EtOH))
+colnames(gene_counts_NASH) <- paste0("N_", colnames(gene_counts_NASH))
+
+# Display the column names of each subset
+list(Control = colnames(gene_counts_Control), EtOH = colnames(gene_counts_EtOH), NASH = colnames(gene_counts_NASH))
+```
+
+
+```{r merge-and-save-all}
+# Merge Control, EtOH, and NASH data frames
+gene_counts_all <- cbind(gene_counts_Control, gene_counts_EtOH, gene_counts_NASH)
+
+# Display the first few rows of the merged data frame
+head(gene_counts_all)
+
+# Save the merged data frame to a file
+write.table(gene_counts_all, "raw_gene_counts_all.txt", sep = "\t", quote = FALSE, col.names = NA)
+```
+
+```{r}
+# Define the columns you want to keep
+columns_to_keep <- c("C_S27", "C_S28", "C_S31", "C_S43", "C_S48", 
+                     "E_S36", "E_S41", "E_S42", "E_S49", "E_S50", 
+                     "N_S29", "N_S30", "N_S37", "N_S38", "N_S46")
+
+# Subset the dataframe to keep only the specified columns
+gene_counts_subset <- gene_counts_all[, columns_to_keep]
+
+
+# Save the merged data frame to a file
+write.table(gene_counts_subset, "gene_counts_all.txt", sep = "\t", quote = FALSE, col.names = NA)
+
+
+```
+
+
+
+
+# Introduction
+
+This analysis focuses on gene expression differences between Control, EtOH, and NASH samples using DESeq2. We will load the gene count data, perform filtering, and run the DESeq2 analysis step by step.
+
+# Local Gene Counts Analysis
+
+## Library Installation and Loading
+
+The following block installs necessary libraries (if not already installed) and loads them for subsequent use. It also includes the installation of annotation databases for gene mapping.
+
+```{r setup-installation, include=FALSE}
+# Install necessary libraries if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(c("DESeq2", "pheatmap", "ggplot2", "EnhancedVolcano","AnnotationDbi","org.Hs.eg.db","biomaRt", "clusterProfiler"))
+
+# Load necessary libraries
+library(DESeq2)
+library(pheatmap)
+library(ggplot2)
+library(EnhancedVolcano)
+library("org.Hs.eg.db")
+library(clusterProfiler)
+
+```
+
+## Load the Gene Count Data
+
+In this step, we will load the gene count data from a tab-separated file called `gene_counts_all.tsv`. The data frame contains gene counts for each sample, with genes as rows and samples as columns.
+
+
+```{r load-data, warning=FALSE, message=FALSE}
+
+# Load the gene counts data
+gene_counts <- read.table("gene_counts_all.txt", header = TRUE, sep = "\t", row.names = 1)
+
+# Display the first few rows of the data frame
+colnames(gene_counts)
+```
+
+## Prepare Metadata
+
+This step involves creating a metadata (colData) data frame that describes the condition for each sample. The conditions include Control, EtOH, and NASH samples.
+
+```{r prepare-metadata, warning=FALSE, message=FALSE}
+# Create a metadata (colData) data frame that describes the conditions for each sample
+sample_conditions <- data.frame(
+  row.names = colnames(gene_counts),
+  condition = c(rep("Control", 5), rep("EtOH", 5), rep("NASH", 5))
+)
+
+# Display the metadata
+sample_conditions
+```
+
+
+## Filter Out Zero Counts
+
+Here, we filter out genes with all zero counts across all samples, as they provide no information for analysis.
+
+```{r filter-zero-counts, warning=FALSE, message=FALSE}
+# Filter out genes with all zero counts
+gene_counts_filtered <- gene_counts[rowSums(gene_counts != 0) > 0, ]
+
+# Display the first few rows of the filtered data frame
+dim(gene_counts_filtered)
+```
+
+
+
+## Filter by Mean Expression
+
+After removing genes with zero counts, we further filter genes based on their mean expression across samples. Only genes with a mean expression greater than a specified threshold 10 are kept for analysis.
+
+```{r filter-by-mean, warning=FALSE, message=FALSE}
+# Calculate the mean expression for each gene
+gene_means <- rowMeans(gene_counts_filtered)
+
+# Filter out genes with mean expression below a certain threshold (e.g., mean < 10)
+mean_threshold <- 10
+gene_counts_filtered <- gene_counts_filtered[gene_means >= mean_threshold, ]
+
+# Display the first few rows of the filtered data frame
+dim(gene_counts_filtered)
+```
+
+
+## Create DESeq2 Dataset
+
+DESeq2 requires a DESeqDataSet object, which is created by providing the count data and sample information (metadata). Here, we create the dataset using the filtered gene count data.
+
+```{r create-deseq-dataset-filtered, warning=FALSE, message=FALSE}
+
+# Create the DESeqDataSet with counts
+dds_filtered <- DESeqDataSetFromMatrix(countData = gene_counts_filtered,
+                                       colData = sample_conditions,
+                                       design = ~ condition)
+
+
+# Display the DESeqDataSet object
+dds_filtered
+
+```
+
+## Run DESeq2
+
+Now that we have the dataset ready, we run the DESeq2 analysis to identify differentially expressed genes between the conditions.
+
+```{r run-deseq2, warning=FALSE, message=FALSE}
+# Run the DESeq2 differential expression analysis
+dds_filtered <- DESeq(dds_filtered)
+
+dds_filtered
+```
+
+# Pre-Analysis
+
+## Extract Results for Control vs EtOH
+
+We are extracting the results of the differential expression analysis for the Control vs EtOH comparison.
+
+```{r extract-results-etoh, warning=FALSE, message=FALSE}
+
+# Extract the results for Control vs EtOH
+results_control_etoh <- results(dds_filtered, contrast = c("condition", "Control", "EtOH"))
+
+# Display the first few rows of the results
+summary(results_control_etoh)
+
+
+```
+
+## Extract Results for NASH vs Control
+
+We are extracting the results of the differential expression analysis for the NASH vs Control comparison.
+
+```{r extract-results-nash, warning=FALSE, message=FALSE}
+
+#Extract results for NASH:
+
+results_control_nash <- results(dds_filtered, contrast = c("condition", "Control", "NASH"))
+
+
+summary(results_control_nash)
+
+
+```
+
+# Main Analysis
+
+## Plot Dispersion Estimates
+
+We are plotting the dispersion estimates to visualize gene-wise dispersion across samples.
+
+```{r plot-dispersion, warning=FALSE, message=FALSE}
+
+#Plot the dispersion estimates:
+
+plotDispEsts(dds_filtered)
+
+pdf("DispersionPlot.pdf")
+plotDispEsts(dds_filtered)
+dev.off()
+```
+
+## PCA Plot
+
+
+
+
+```{r}
+# Perform variance-stabilizing transformation (VST) on dds_filtered
+vsd <- vst(dds_filtered, blind = FALSE)  # or use rlog for rlog-transformed data
+
+# Extract the transformed expression data
+pca_data <- assay(vsd)  # This will be used for PCA
+
+
+# Perform PCA on the transposed matrix (samples as rows)
+pca <- prcomp(t(pca_data), scale. = TRUE)
+
+# Extract the sample metadata (conditions)
+sample_conditions <- colData(dds_filtered)$condition  # Assuming this contains 'Control', 'EtOH', 'NASH'
+
+# Create a data frame for PCA plotting
+pca_df <- data.frame(PC1 = pca$x[,1], PC2 = pca$x[,2], Condition = sample_conditions)
+
+# Load ggplot2 for plotting
+library(ggplot2)
+
+# Plot PCA with points colored by Condition (Control, EtOH, NASH)
+pca_plot <- ggplot(pca_df, aes(x = PC1, y = PC2, color = Condition)) +
+    geom_point(size = 3) +
+    theme_minimal() +
+    labs(title = "PCA of Gene Expression Data",
+         x = paste0("PC1: ", round(100 * summary(pca)$importance[2,1], 1), "% variance"),
+         y = paste0("PC2: ", round(100 * summary(pca)$importance[2,2], 1), "% variance")) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+# Display the plot
+print(pca_plot)
+
+# Save the plot as a PDF
+ggsave("PCA_plot_Control_EtOH_NASH.pdf", plot = pca_plot, width = 8, height = 6)
+```
+
+## Extract Significant Results for EtOH
+
+We are extracting the significantly differentially expressed genes for EtOH vs Control (adjusted p-value \< 0.05).
+
+```{r extract-significant-etoh, warning=FALSE, message=FALSE}
+
+#Extract significant results:
+
+sigs_control_etoh <- na.omit(results_control_etoh)
+sigs_control_etoh <- sigs_control_etoh[sigs_control_etoh$padj < 0.05, ]
+
+
+# Convert sigs_control_etoh (DESeqResults object) to a data frame
+sigs_control_etoh_df <- as.data.frame(sigs_control_etoh)
+
+# Load biomaRt package
+library(biomaRt)
+
+# Use the ENSEMBL database to retrieve gene symbols
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Get the gene symbols for the ENSEMBL IDs in sigs_control_etoh_df
+genes <- rownames(sigs_control_etoh_df)
+gene_info <- getBM(filters = "ensembl_gene_id", 
+                   attributes = c("ensembl_gene_id", "hgnc_symbol"), 
+                   values = genes, 
+                   mart = mart)
+
+# Add the ensembl_gene_id as a new column in sigs_control_nash_df
+sigs_control_etoh_df$ensembl_gene_id <- rownames(sigs_control_etoh_df)
+
+# Merge the gene symbols into sigs_control_nash_df
+sigs_control_etoh_annotated <- merge(sigs_control_etoh_df, gene_info, by = "ensembl_gene_id", all.x = TRUE)
+
+# Reorder columns to make gene symbols appear first if desired
+sigs_control_etoh_annotated <- sigs_control_etoh_annotated[, c("hgnc_symbol", "ensembl_gene_id", colnames(sigs_control_etoh_annotated)[-c(1, ncol(sigs_control_etoh_annotated))])]
+
+
+# Save the annotated results as an Excel file
+library(writexl)
+
+write_xlsx(sigs_control_etoh_annotated, "sigs_control_etoh_with_gene_symbols.xlsx")
+
+```
+
+
+
+
+
+## Extract Significant Results for NASH
+
+We are extracting the significantly differentially expressed genes for NASH vs Control (adjusted p-value \< 0.05).
+
+```{r extract-significant-nash, warning=FALSE, message=FALSE}
+
+#Extract significant results:
+
+sigs_control_nash <- na.omit(results_control_nash)
+sigs_control_nash <- sigs_control_nash[sigs_control_nash$padj < 0.05, ]
+
+
+# Convert sigs_control_nash (DESeqResults object) to a data frame
+sigs_control_nash_df <- as.data.frame(sigs_control_nash)
+
+# Load biomaRt package
+library(biomaRt)
+
+# Use the ENSEMBL database to retrieve gene symbols
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Get the gene symbols for the ENSEMBL IDs in sigs_control_nash_df
+genes <- rownames(sigs_control_nash_df)
+gene_info <- getBM(filters = "ensembl_gene_id", 
+                   attributes = c("ensembl_gene_id", "hgnc_symbol"), 
+                   values = genes, 
+                   mart = mart)
+
+# Add the ensembl_gene_id as a new column in sigs_control_nash_df
+sigs_control_nash_df$ensembl_gene_id <- rownames(sigs_control_nash_df)
+
+# Merge the gene symbols into sigs_control_nash_df
+sigs_control_nash_annotated <- merge(sigs_control_nash_df, gene_info, by = "ensembl_gene_id", all.x = TRUE)
+
+# Reorder columns to make gene symbols appear first if desired
+sigs_control_nash_annotated <- sigs_control_nash_annotated[, c("hgnc_symbol", "ensembl_gene_id", colnames(sigs_control_nash_annotated)[-c(1, ncol(sigs_control_nash_annotated))])]
+
+
+# Save the annotated results as an Excel file
+library(writexl)
+write_xlsx(sigs_control_nash_annotated, "sigs_control_nash_with_gene_symbols.xlsx")
+
+```
+
+
+## Final Volcano Plot for EtOH with Gene Symbols
+
+We are generating a Volcano plot using gene symbols for labeling the significant results in EtOH vs Control.
+
+```{r final-volcano-etoh, warning=FALSE, message=FALSE}
+
+#Map ENSEMBL IDs to gene symbols and generate the Volcano plot:
+
+sigs.df_control_etoh <- as.data.frame(sigs_control_etoh)
+
+sigs.df_control_etoh$symbol <- mapIds(org.Hs.eg.db, 
+                         keys = rownames(sigs.df_control_etoh), 
+                         keytype = "ENSEMBL", 
+                         column = "SYMBOL",
+                         multiVals = function(x) paste(x, collapse = ";"))
+
+
+# Define the cutoffs
+pCutoffValue <- 0.05
+FCcutoffValue <- 1.0
+
+
+EnhancedVolcano(sigs.df_control_etoh,
+                lab = sigs.df_control_etoh$symbol,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = pCutoffValue,
+                FCcutoff = FCcutoffValue,
+                pointSize = 2.0,
+                labSize = 3.0,
+                title = 'Volcano Plot with Gene Symbols',
+                subtitle = 'Control EtOH Significant Results',
+                caption = paste('pCutoff:', pCutoffValue, 'FCcutoff:', FCcutoffValue))
+
+# Save the EnhancedVolcano plot as a PDF
+pdf("EtOH_EnhancedVolcanoPlot_with_GeneSymbols.pdf")
+EnhancedVolcano(sigs.df_control_etoh,
+                lab = sigs.df_control_etoh$symbol,  # Use the gene symbols for labeling
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = pCutoffValue,
+                FCcutoff = FCcutoffValue,
+                pointSize = 2.0,
+                labSize = 3.0,
+                title = 'Volcano Plot with Gene Symbols',
+                subtitle = 'Control-EtOH Significant Results',
+                caption = paste('pCutoff:', pCutoffValue, 'FCcutoff:', FCcutoffValue))
+dev.off()
+
+```
+
+## Final Volcano Plot for NASH with Gene Symbols
+
+We are generating a Volcano plot using gene symbols for labeling the significant results in NASH vs Control.
+
+```{r final-volcano-nash, warning=FALSE, message=FALSE}
+
+# Map ENSEMBL IDs to gene symbols and generate the Volcano plot:
+
+sigs.df_control_nash <- as.data.frame(sigs_control_nash)
+
+sigs.df_control_nash$symbol <- mapIds(org.Hs.eg.db, 
+                         keys = rownames(sigs.df_control_nash), 
+                         keytype = "ENSEMBL", 
+                         column = "SYMBOL",
+                         multiVals = function(x) paste(x, collapse = ";"))
+
+
+# Define the cutoffs
+pCutoffValue <- 0.05
+FCcutoffValue <- 1.0
+
+EnhancedVolcano(sigs.df_control_nash,
+                lab = sigs.df_control_nash$symbol,
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = pCutoffValue,
+                FCcutoff = FCcutoffValue,
+                pointSize = 2.0,
+                labSize = 3.0,
+                title = 'Volcano Plot with Gene Symbols',
+                subtitle = 'CONTROL NASH Significant Results',
+                caption = paste('pCutoff:', pCutoffValue, 'FCcutoff:', FCcutoffValue))
+
+# Save the EnhancedVolcano plot as a PDF
+pdf("NASH_EnhancedVolcanoPlot_with_GeneSymbols.pdf")
+EnhancedVolcano(sigs.df_control_nash,
+                lab = sigs.df_control_nash$symbol,  # Use the gene symbols for labeling
+                x = 'log2FoldChange',
+                y = 'padj',
+                pCutoff = pCutoffValue,
+                FCcutoff = FCcutoffValue,
+                pointSize = 2.0,
+                labSize = 3.0,
+                title = 'Volcano Plot with Gene Symbols',
+                subtitle = 'CONTROL-NASH Significant Results',
+                caption = paste('pCutoff:', pCutoffValue, 'FCcutoff:', FCcutoffValue))
+dev.off()
+
+```
+
+
+## Top Genes Heatmap Control_EtOH
+
+
+```{r}
+
+# Assuming you already have `sigs_control_etoh` with gene symbols loaded
+# Load the DESeq2 object that contains the count data (dds_filtered object)
+# Filter the DESeq2 object to only keep Control and EtOH samples
+dds_filtered_control_etoh <- dds_filtered[, colData(dds_filtered)$condition %in% c("Control", "EtOH")]
+
+# Get the normalized counts for the significant genes from Control vs. EtOH
+# Extract only the genes that are significant and present in your filtered data
+significant_genes <- rownames(sigs_control_etoh)  # Assuming rownames are gene symbols or ENSEMBL IDs
+normalized_counts <- counts(dds_filtered_control_etoh, normalized = TRUE)
+sig_gene_counts <- normalized_counts[significant_genes, ]
+
+
+# Step 1: Sort the significant genes from EtOH by log2FoldChange and select the top 20
+top_genes_etoh <- sigs_control_etoh[order(-sigs_control_etoh$log2FoldChange), ][1:20, ]  # Top 20 upregulated genes for EtOH
+
+# Step 2: Get the normalized counts for these top genes
+top_gene_ensembl_ids_etoh <- rownames(top_genes_etoh)  # These are ENSEMBL IDs
+top_gene_counts_etoh <- normalized_counts[top_gene_ensembl_ids_etoh, ]
+
+# Step 3: Use biomaRt to convert ENSEMBL IDs to gene symbols for EtOH
+# Connect to the Ensembl database
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Query to get gene symbols for the given ENSEMBL IDs
+gene_mapping_etoh <- getBM(
+    filters = "ensembl_gene_id",
+    attributes = c("ensembl_gene_id", "hgnc_symbol"),
+    values = top_gene_ensembl_ids_etoh,
+    mart = mart
+)
+
+# Merge the gene symbols with your top gene data
+# Ensure the order matches the original ENSEMBL IDs
+top_gene_symbols_etoh <- gene_mapping_etoh$hgnc_symbol[match(top_gene_ensembl_ids_etoh, gene_mapping_etoh$ensembl_gene_id)]
+
+# Replace any missing symbols with the ENSEMBL IDs (in case symbols are missing)
+top_gene_symbols_etoh[is.na(top_gene_symbols_etoh)] <- top_gene_ensembl_ids_etoh[is.na(top_gene_symbols_etoh)]
+
+# Optional: Log transform the counts to reduce the dynamic range
+log_top_counts_etoh <- log2(top_gene_counts_etoh + 1)
+
+# Step 4: Ensure the annotation_col is a data frame with proper column names (for Control vs. EtOH)
+annotation_col_etoh <- data.frame(Condition = colData(dds_filtered)$condition)
+rownames(annotation_col_etoh) <- colnames(dds_filtered)
+
+# Step 5: Save the heatmap as a PDF with gene symbols as row names for EtOH
+pdf("heatmap_control_etoh_top_genes.pdf", width = 10, height = 8)
+
+# Generate the heatmap with gene symbols as row names
+pheatmap(log_top_counts_etoh, 
+         cluster_rows = TRUE,     
+         cluster_cols = TRUE,     
+         show_rownames = TRUE,    # Show row names for the top genes (gene symbols)
+         labels_row = top_gene_symbols_etoh,  # Use gene symbols as row labels
+         show_colnames = TRUE,    # Keep column names
+         annotation_col = annotation_col_etoh,   # Correctly formatted annotation data
+         main = "Heatmap of Top 20 Significant Genes (Control vs. EtOH)")
+
+dev.off()  # Close the PDF device
+
+```
+
+## Top Genes Heatmap Control_NASH
+
+```{r}
+
+# Assuming you already have `sigs_control_nash` with gene symbols loaded
+# Load the DESeq2 object that contains the count data (dds_filtered object)
+# Filter the DESeq2 object to only keep Control and NASH samples
+dds_filtered_control_nash <- dds_filtered[, colData(dds_filtered)$condition %in% c("Control", "NASH")]
+
+# Get the normalized counts for the significant genes from Control vs. NASH
+# Extract only the genes that are significant and present in your filtered data
+significant_genes <- rownames(sigs_control_nash)  # Assuming rownames are gene symbols or ENSEMBL IDs
+normalized_counts <- counts(dds_filtered_control_nash, normalized = TRUE)
+sig_gene_counts <- normalized_counts[significant_genes, ]
+
+
+# Step 1: Sort the significant genes from NASH by log2FoldChange and select the top 20
+top_genes_nash <- sigs_control_nash[order(-sigs_control_nash$log2FoldChange), ][1:20, ]  # Top 20 upregulated genes for NASH
+
+# Step 2: Get the normalized counts for these top genes
+top_gene_ensembl_ids_nash <- rownames(top_genes_nash)  # These are ENSEMBL IDs
+top_gene_counts_nash <- normalized_counts[top_gene_ensembl_ids_nash, ]
+
+# Step 3: Use biomaRt to convert ENSEMBL IDs to gene symbols for NASH
+# Connect to the Ensembl database
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+# Query to get gene symbols for the given ENSEMBL IDs
+gene_mapping_nash <- getBM(
+    filters = "ensembl_gene_id",
+    attributes = c("ensembl_gene_id", "hgnc_symbol"),
+    values = top_gene_ensembl_ids_nash,
+    mart = mart
+)
+
+# Merge the gene symbols with your top gene data
+# Ensure the order matches the original ENSEMBL IDs
+top_gene_symbols_nash <- gene_mapping_nash$hgnc_symbol[match(top_gene_ensembl_ids_nash, gene_mapping_nash$ensembl_gene_id)]
+
+# Replace any missing symbols with the ENSEMBL IDs (in case symbols are missing)
+top_gene_symbols_nash[is.na(top_gene_symbols_nash)] <- top_gene_ensembl_ids_nash[is.na(top_gene_symbols_nash)]
+
+# Optional: Log transform the counts to reduce the dynamic range
+log_top_counts_nash <- log2(top_gene_counts_nash + 1)
+
+# Step 4: Ensure the annotation_col is a data frame with proper column names (for Control vs. NASH)
+annotation_col_nash <- data.frame(Condition = colData(dds_filtered)$condition)
+rownames(annotation_col_nash) <- colnames(dds_filtered)
+
+# Step 5: Save the heatmap as a PDF with gene symbols as row names for NASH
+pdf("heatmap_control_nash_top_genes.pdf", width = 10, height = 8)
+
+# Generate the heatmap with gene symbols as row names
+pheatmap(log_top_counts_nash, 
+         cluster_rows = TRUE,     
+         cluster_cols = TRUE,     
+         show_rownames = TRUE,    # Show row names for the top genes (gene symbols)
+         labels_row = top_gene_symbols_nash,  # Use gene symbols as row labels
+         show_colnames = TRUE,    # Keep column names
+         annotation_col = annotation_col_nash,   # Correctly formatted annotation data
+         main = "Heatmap of Top 20 Significant Genes (Control vs. NASH)")
+
+dev.off()  # Close the PDF device
+
+```
+
+
+
+
+## GSEA for Control_EtOH
+
+```{r}
+# Create a ranked gene list based on log2FoldChange
+# Remove any NA values and sort by log2FoldChange
+gene_list <- sigs_control_etoh_annotated$log2FoldChange
+names(gene_list) <- sigs_control_etoh_annotated$ensembl_gene_id  # Use gene symbols or ENSEMBL IDs
+
+# Remove NA values and sort the list in decreasing order (for GSEA)
+gene_list <- sort(na.omit(gene_list), decreasing = TRUE)
+
+# Load necessary packages
+library(clusterProfiler)
+library(org.Hs.eg.db)  # Load human gene annotation
+
+# Perform GSEA using GO terms (Biological Process, Molecular Function, and Cellular Component)
+gsea_results <- gseGO(geneList = gene_list, 
+                        OrgDb = org.Hs.eg.db,    # Use human gene annotation
+                        ont = "BP",             # Perform GSEA for all GO categories (BP, MF, CC)
+                        pvalueCutoff = 0.05,     # p-value cutoff for enrichment
+                        keyType = "ENSEMBL",     # Use ENSEMBL IDs for genes
+                        minGSSize = 15,          # Minimum size of gene sets
+                        maxGSSize = 500,         # Maximum size of gene sets
+                        eps = 0)
+
+
+# Convert GSEA results to a data frame
+gsea_df <- as.data.frame(gsea_results)
+
+# Add a Regulation column indicating up- or down-regulation
+gsea_df$Regulation <- ifelse(gsea_df$NES > 0, "Upregulated", "Downregulated")
+
+
+# Modify the dot plot to color by Regulation (Upregulated or Downregulated)
+go_gsea_plot <- ggplot(gsea_df[1:20, ], aes(x = NES, y = reorder(Description, NES), color = Regulation, size = setSize)) +
+  geom_point() +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue")) +
+  labs(title = "Top 20 Enriched GO Terms Control EtOH",
+       x = "Normalized Enrichment Score (NES)",
+       y = "GO Terms") +
+  theme_minimal()
+
+# Print the plot
+print(go_gsea_plot)
+
+# Save the plot as a PDF file
+ggsave("go_gsea_plot_control_etoh.pdf", plot = go_gsea_plot, width = 10, height = 7)
+```
+
+
+
+### GSEA for Control_NASH
+
+``` {r}
+# Create a ranked gene list based on log2FoldChange
+# Remove any NA values and sort by log2FoldChange
+gene_list <- sigs_control_nash_annotated$log2FoldChange
+names(gene_list) <- sigs_control_nash_annotated$ensembl_gene_id  # Use gene symbols or ENSEMBL IDs
+
+# Remove NA values and sort the list in decreasing order (for GSEA)
+gene_list <- sort(na.omit(gene_list), decreasing = TRUE)
+
+# Load necessary packages
+library(clusterProfiler)
+library(org.Hs.eg.db)  # Load human gene annotation
+
+# Perform GSEA using GO terms (Biological Process, Molecular Function, and Cellular Component)
+gsea_results <- gseGO(geneList = gene_list, 
+                        OrgDb = org.Hs.eg.db,    # Use human gene annotation
+                        ont = "BP",             # Perform GSEA for all GO categories (BP, MF, CC)
+                        pvalueCutoff = 0.05,     # p-value cutoff for enrichment
+                        keyType = "ENSEMBL",     # Use ENSEMBL IDs for genes
+                        minGSSize = 15,          # Minimum size of gene sets
+                        maxGSSize = 500,         # Maximum size of gene sets
+                        eps = 0)
+
+
+# Convert GSEA results to a data frame
+gsea_df <- as.data.frame(gsea_results)
+
+# Add a Regulation column indicating up- or down-regulation
+gsea_df$Regulation <- ifelse(gsea_df$NES > 0, "Upregulated", "Downregulated")
+
+
+# Modify the dot plot to color by Regulation (Upregulated or Downregulated)
+go_gsea_plot_nash <- ggplot(gsea_df[1:20, ], aes(x = NES, y = reorder(Description, NES), color = Regulation, size = setSize)) +
+  geom_point() +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue")) +
+  labs(title = "Top 20 Enriched GO Terms Control NASH",
+       x = "Normalized Enrichment Score (NES)",
+       y = "GO Terms") +
+  theme_minimal()
+
+# Print the plot
+print(go_gsea_plot_nash)
+
+# Save the plot as a PDF file
+ggsave("go_gsea_plot_control_nash.pdf", plot = go_gsea_plot_nash, width = 10, height = 7)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
